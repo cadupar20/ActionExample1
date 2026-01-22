@@ -1,4 +1,4 @@
-# gh_action_example2
+# Readme.md
 
 Repositorio de ejemplo para demostrar una estructura mínima y buenas prácticas de documentación.
 
