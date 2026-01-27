@@ -2,6 +2,8 @@
 
 Repositorio de ejemplo para demostrar una estructura mínima y buenas prácticas de documentación.
 
+Esto es una mejora que quiero incorporar dentro de mi rama dev-test.
+
 ## Descripción
 
 Proyecto de ejemplo que contiene archivos y ejemplos básicos para ilustrar el uso de GitHub Actions y flujos de trabajo asociados.   .
