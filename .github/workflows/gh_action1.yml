@@ -66,6 +66,7 @@ jobs:
   # ─────────────────────────────────────────────
   terraform-build:
     name: 3rd job - Terraform Build
+    if: false # ← deshabilitado temporalmente, GitHub lo saltea 
     runs-on: ubuntu-latest
 
     # Directorio raíz de Terraform (donde vive main.tf)
