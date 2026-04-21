@@ -1,0 +1,11 @@
+# Exclusiones Visual Code
+.vscode
+
+# Exclusiones de archivos Terraform
+*.tfstate
+*.tfstate.backup
+*.terraform
+.terraform/
+.terraform.lock.hcl
+.tfstate
+.tfstate.backup
