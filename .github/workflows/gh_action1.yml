@@ -65,9 +65,9 @@ jobs:
   #   main     → envs/prod.tfvars
   # ─────────────────────────────────────────────
   terraform-build:
-    name: 3rd job - Terraform Build
-    if: false # ← deshabilitado temporalmente, GitHub lo saltea 
-    runs-on: ubuntu-latest
+    name: 3rd job - Terraform Build # Nombre del Job, visible en UI Github Actions
+    if: false # ← deshabilitado temporalmente, GitHub lo saltea sin ejecutarlo
+    runs-on: ubuntu-latest #Runner donde se ejecuta
 
     # Directorio raíz de Terraform (donde vive main.tf)
     defaults:
@@ -76,16 +76,20 @@ jobs:
 
     steps:
       # 1. Checkout del repositorio (necesario para acceder a los archivos .tf y .tfvars)
+      # Clona el código del repo en el runner. Es obligatorio porque los archivos `.tf`, `.tfvars` y los módulos locales viven en el repo.
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # 2. Instala la CLI de Terraform en el runner
+      # Instala la versión exacta `1.7.0` de Terraform en el runner. Esto garantiza reproducibilidad (mismo comportamiento en local y en CI).
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.0"
 
       # 3. Determina el archivo .tfvars según la rama activa y lo expone como variable de entorno
+      # Esto crea una __variable de entorno persistente__ (`TFVARS_FILE`) que puede usarse en steps posteriores vía `${{ env.TFVARS_FILE }}`.
+      #  __Mecanismo clave:__ `echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV`
       - name: Set environment tfvars
         id: set_env
         run: |
@@ -115,12 +119,20 @@ jobs:
           exit 1
 
       # 5. Terraform Plan — genera el plan de ejecución usando el .tfvars del entorno
+      #- Lee las variables del archivo `.tfvars` correspondiente al entorno
+      #- Compara el estado actual (remoto o local) con la configuración deseada
+      #- Genera un __plan de ejecución__ y lo guarda en el archivo binario `tfplan`
+      #- Muestra en consola qué recursos se crearán, modificarán o destruirán
+      #
+      #__`-var-file="${{ env.TFVARS_FILE }}"`__ → Inyecta las variables del entorno correcto.\
+      #__`-out=tfplan`__ → Guarda el plan en un archivo para que `apply` lo consuma exactamente (evita recalcular).
       - name: Terraform Plan
         id: tf_plan
         run: terraform plan -var-file="${{ env.TFVARS_FILE }}" -out=tfplan
         continue-on-error: true
 
       # 5b. Manejo de error en Plan — imprime mensaje descriptivo y detiene el job
+      # Mismo patrón que el manejo de Init: detecta fallo, imprime mensaje descriptivo con el archivo de variables usado, y detiene el job.
       - name: Handle Plan failure
         if: steps.tf_plan.outcome == 'failure'
         run: |
@@ -128,6 +140,7 @@ jobs:
           exit 1
 
       # 6. Terraform Apply — aplica el plan generado (solo en push, no en pull_request)
+      # Esto es una __buena práctica de seguridad__: los PRs solo hacen `plan` (preview), nunca `apply`.
       - name: Terraform Apply
         id: tf_apply
         if: github.event_name == 'push'
@@ -135,6 +148,7 @@ jobs:
         continue-on-error: true
 
       # 6b. Manejo de error en Apply — imprime mensaje descriptivo y detiene el job
+      # Captura fallos en la aplicación real (permisos AWS, conflictos de estado, límites de servicio, etc.).
       - name: Handle Apply failure
         if: steps.tf_apply.outcome == 'failure'
         run: |
@@ -142,6 +156,7 @@ jobs:
           exit 1
 
       # 7. Confirmación de éxito
+      # Mensaje de éxito visible en los logs, solo cuando el evento fue `push` y todo salió bien.
       - name: Terraform apply success
         if: github.event_name == 'push'
         run: echo "✅ Terraform Apply completado exitosamente para el entorno ${{ env.TFVARS_FILE }}."
