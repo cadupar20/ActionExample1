@@ -124,7 +124,7 @@ jobs:
       #- Genera un __plan de ejecución__ y lo guarda en el archivo binario `tfplan`
       #- Muestra en consola qué recursos se crearán, modificarán o destruirán
       #
-      #__`-var-file="${{ env.TFVARS_FILE }}"`__ → Inyecta las variables del entorno correcto.\
+      #__`-var-file=" env.TFVARS_FILE "`__ → Inyecta las variables del entorno correcto.\
       #__`-out=tfplan`__ → Guarda el plan en un archivo para que `apply` lo consuma exactamente (evita recalcular).
       - name: Terraform Plan
         id: tf_plan
