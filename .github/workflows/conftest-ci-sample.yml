@@ -83,7 +83,7 @@ jobs:
       # Terraform Plan — genera el plan de ejecución usando el .tfvars del entorno.
       # - Lee las variables del archivo `.tfvars` correspondiente al entorno.
       # - Compara el estado actual (remoto o local) con la configuración deseada.
-      # - Genera un plan de ejecución y lo guarda en el archivo binario `tfplan`.
+      # - Genera un plan de ejecución y lo guarda en el archivo binario `tfplan.bin`.
       # - Muestra en consola qué recursos se crearán, modificarán o destruirán.
       #
       # `-var-file=" env.TFVARS_FILE "` → Inyecta las variables del entorno correcto.
@@ -99,7 +99,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform plan -var-file="${{ env.TFVARS_FILE }}" -out=tfplan -no-color -lock=false -parallelism=50
+        run: terraform plan -var-file="${{ env.TFVARS_FILE }}" -out=tfplan.bin -no-color -lock=false -parallelism=50
         continue-on-error: true
 
       # Manejo de error en Plan — imprime mensaje descriptivo y detiene el job
@@ -110,13 +110,13 @@ jobs:
           exit 1
 
       # Terraform Show (texto plano) — genera una versión legible del plan para comentarios en PR.
-      # El archivo binario `tfplan` no es legible humanamente; `terraform show` lo convierte a texto.
+      # El archivo binario `tfplan.bin` no es legible humanamente; `terraform show` lo convierte a texto.
       # Este archivo (`tfplan.txt`) se usa para publicar el diff en comentarios del Pull Request.
       - name: Convert terraform plan result to text
         if: github.event_name == 'pull_request'
         id: convert_tfplan_text
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform show -no-color tfplan > tfplan.txt
+        run: terraform show -no-color tfplan.bin > tfplan.txt
         continue-on-error: true
 
       # Manejo de error en Show a texto — detiene el job si no se puede generar la representación legible.
@@ -127,13 +127,13 @@ jobs:
           exit 1
 
       # Terraform Show (JSON) — genera el archivo JSON requerido por Conftest/OPA.
-      # Conftest consume JSON, no el binario `tfplan`. `terraform show -json` serializa el plan completo
+      # Conftest consume JSON, no el binario `tfplan.bin`. `terraform show -json` serializa el plan completo
       # (recursos, variables, outputs, cambios) en un formato que las políticas Rego pueden evaluar.
       - name: Convert terraform plan result to json format
         if: github.event_name == 'pull_request'
         id: convert_tfplan
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform show -json tfplan > tfplan.json
+        run: terraform show -json tfplan.bin > tfplan.json
         continue-on-error: true
 
       # Manejo de error en Show a JSON — detiene el job si no se puede generar el JSON para Conftest.
@@ -143,6 +143,46 @@ jobs:
           echo "::error::❌ TERRAFORM SHOW (JSON) ha fallado. No se pudo generar el archivo para Conftest."
           exit 1
     
+      # Checkov — análisis estático de mejores prácticas sobre los archivos .tf
+      # Checkov escanea el código fuente de Terraform (no el plan) y detecta configuraciones
+      # inseguras o que no siguen best practices de AWS (CIS Benchmark, NIST, etc.).
+      # Se ejecuta antes de Conftest para detectar problemas en el código fuente tempranamente.
+      # `--directory` apunta al directorio con los archivos .tf
+      # `--framework terraform` limita el análisis solo a recursos Terraform
+      # `--output cli` muestra resultados en consola con formato legible
+      # `--soft-fail` permite que el step continúe aunque haya findings (se controla en el siguiente step)
+      - name: Install and run Checkov
+        if: github.event_name == 'pull_request'
+        id: checkov
+        run: |
+          pip install checkov --quiet
+          checkov \
+            --directory ${{ env.WORKING_DIR }} \
+            --framework terraform \
+            --output cli \
+            --output junitxml \
+            --output-file-path console,checkov-report.xml \
+            --no-guide \
+            --compact \
+            --soft-fail
+        continue-on-error: true
+
+      # Manejo de error en Checkov — detiene el job si hay findings críticos
+      - name: Handle Checkov failure
+        if: steps.checkov.outcome == 'failure'
+        run: |
+          echo "::error::❌ CHECKOV ha fallado. Se detectaron configuraciones que no cumplen con las mejores prácticas de Terraform/AWS. Revisá el reporte en los logs."
+          exit 1
+
+      # Publica el reporte de Checkov como artefacto para revisión
+      - name: Upload Checkov report
+        if: github.event_name == 'pull_request' && steps.checkov.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-report-${{ github.ref_name }}-${{ github.run_id }}
+          path: checkov-report.xml
+          retention-days: 15
+
       # Conftest — validación de políticas contra el plan de Terraform.
       # Conftest ejecuta políticas Rego ubicadas por defecto en la carpeta `policy/` del working dir.
       # Evalúa que el plan cumpla con normas de seguridad, costos, tagging, etc.
@@ -186,7 +226,7 @@ jobs:
       # Opción B — Guardar artefactos del plan para auditoría y posible apply posterior.
       # El artefacto incluye tanto el plan binario (`tfplan`) como el JSON (`tfplan.json`).
       # `retention-days: 15` limita el almacenamiento en GitHub.
-      - name: Upload Plan Artifact
+      - name: Upload Plan Artifact Gitlab
         if: steps.conftest.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:

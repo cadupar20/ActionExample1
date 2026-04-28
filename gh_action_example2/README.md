@@ -122,21 +122,135 @@ variables_entorno:
 
 #### Job 3 — `terraform-build` (3rd job)
 
-Ejecuta `terraform init → plan → apply` con manejo de errores por paso.
-El `apply` solo corre en eventos `push` (no en `pull_request`).
+Ejecuta el pipeline completo de validación y despliegue: `init → plan → Checkov → Conftest → apply`.
+El `apply` solo corre en eventos `push` a `main` (no en `pull_request`).
+Checkov y Conftest solo corren en `pull_request`.
 
-| Step | ID | Descripción |
+##### Flujo de ejecución
+
+```
+[checkout] → [install conftest] → [setup terraform] → [set env tfvars]
+     │
+     ▼
+[tf init] ──✗──► [handle init failure] → exit 1
+     │ ✓
+     ▼
+[tf plan] ──✗──► [handle plan failure] → exit 1
+     │ ✓
+     ▼
+[tf show → tfplan.txt / tfplan.json]
+     │
+     ▼
+[Checkov] ──✗──► [handle checkov failure] → exit 1     ← best practices AWS/CIS
+     │ ✓
+     ▼
+[Conftest] ──✗──► [handle conftest failure] → exit 1   ← políticas custom Rego
+     │ ✓
+     ▼
+[Post plan PR comment] + [Upload artifacts]
+     │
+     ▼  (solo push a main)
+[tf apply] ──✗──► [handle apply failure] → exit 1
+     │ ✓
+     ▼
+[✅ apply success]
+```
+
+##### Tabla de steps
+
+| Step | ID | Evento | Descripción |
+|---|---|---|---|
+| Checkout | — | siempre | Clona el repo en el runner |
+| Install conftest | — | siempre | Descarga e instala conftest en `/usr/local/bin` |
+| Setup Terraform | — | siempre | Instala CLI v1.7.0 con `terraform_wrapper: false` |
+| Set environment tfvars | `set_env` | siempre | Detecta la rama y asigna el `.tfvars` correcto vía `$GITHUB_ENV` |
+| Terraform Init | `tf_init` | siempre | Inicializa backend y providers |
+| Handle Init failure | — | siempre | `outcome == 'failure'` → echo error + exit 1 |
+| Terraform Plan | `tf_plan` | `pull_request` | Genera el plan con `-out=tfplan.bin -no-color -lock=false -parallelism=50` |
+| Handle Plan failure | — | siempre | `outcome == 'failure'` → echo error + exit 1 |
+| Convert plan to text | `convert_tfplan_text` | `pull_request` | `terraform show -no-color tfplan.bin > tfplan.txt` |
+| Convert plan to JSON | `convert_tfplan` | `pull_request` | `terraform show -json tfplan.bin > tfplan.json` |
+| **Checkov** | `checkov` | `pull_request` | Análisis estático de best practices sobre archivos `.tf` |
+| Handle Checkov failure | — | siempre | `outcome == 'failure'` → echo error + exit 1 |
+| Upload Checkov report | — | `pull_request` ✓ | Sube `checkov-report.xml` como artefacto (15 días) |
+| **Conftest** | `conftest` | `pull_request` + checkov ✓ | Valida `tfplan.json` contra políticas Rego en `policy/` |
+| Handle Conftest failure | — | siempre | `outcome == 'failure'` → echo error + exit 1 |
+| Post Plan to PR | — | `pull_request` + conftest ✓ | Publica el plan como comentario en el PR |
+| Upload Plan Artifact | — | conftest ✓ | Sube `tfplan.bin` + `tfplan.json` como artefacto (15 días) |
+| Terraform Apply | `tf_apply` | `push` a `main` + conftest ✓ | Aplica el plan con `-auto-approve` |
+| Handle Apply failure | — | siempre | `outcome == 'failure'` → echo error + exit 1 |
+| Apply success | — | `push` | Confirma éxito con echo |
+
+##### Checkov — análisis estático de best practices
+
+[Checkov](https://www.checkov.io/) escanea los archivos `.tf` directamente (sin necesitar el plan) y detecta configuraciones que no siguen las mejores prácticas de seguridad de AWS (CIS Benchmark, NIST, etc.).
+
+Se ejecuta **antes de Conftest** para detectar problemas en el código fuente tempranamente.
+
+```yaml
+- name: Install and run Checkov
+  if: github.event_name == 'pull_request'
+  id: checkov
+  run: |
+    pip install checkov --quiet
+    checkov \
+      --directory ${{ env.WORKING_DIR }} \
+      --framework terraform \
+      --output cli \
+      --output junitxml \
+      --output-file-path console,checkov-report.xml \
+      --no-guide \
+      --compact \
+      --soft-fail
+  continue-on-error: true
+```
+
+Ejemplos de checks que realiza Checkov sobre los recursos de este módulo:
+
+| Check | Recurso | Descripción |
 |---|---|---|
-| Checkout | — | Clona el repo en el runner |
-| Setup Terraform | — | Instala CLI v1.7.0 |
-| Set environment tfvars | `set_env` | Detecta la rama y asigna el `.tfvars` correcto |
-| Terraform Init | `tf_init` | Inicializa backend y providers |
-| Handle Init failure | — | `if: steps.tf_init.outcome == 'failure'` → echo error + exit 1 |
-| Terraform Plan | `tf_plan` | Genera el plan con el `.tfvars` del entorno |
-| Handle Plan failure | — | `if: steps.tf_plan.outcome == 'failure'` → echo error + exit 1 |
-| Terraform Apply | `tf_apply` | Aplica el plan (solo en `push`) |
-| Handle Apply failure | — | `if: steps.tf_apply.outcome == 'failure'` → echo error + exit 1 |
-| Apply success | — | Confirma éxito con echo |
+| `CKV_AWS_19` | `aws_s3_bucket` | Encriptación habilitada |
+| `CKV_AWS_21` | `aws_s3_bucket` | Versionado habilitado |
+| `CKV_AWS_145` | `aws_s3_bucket` | Encriptación con KMS |
+| `CKV_AWS_18` | `aws_s3_bucket` | Access logging habilitado |
+| `CKV2_AWS_6` | `aws_s3_bucket` | Public access block configurado |
+| `CKV2_AWS_61` | `aws_s3_bucket` | Lifecycle policy configurada |
+| `CKV_AWS_7` | `aws_kms_key` | Rotación de clave habilitada |
+
+##### Conftest — validación de políticas custom (Rego/OPA)
+
+[Conftest](https://www.conftest.dev/) evalúa el plan de Terraform en formato JSON contra las políticas escritas en Rego ubicadas en `terraform/policy/`.
+
+Solo corre si Checkov fue exitoso (`if: steps.checkov.outcome == 'success'`).
+
+```yaml
+- name: Conftest test
+  if: github.event_name == 'pull_request' && steps.checkov.outcome == 'success'
+  id: conftest
+  working-directory: ${{ env.WORKING_DIR }}
+  run: conftest test --no-color tfplan.json
+  continue-on-error: true
+```
+
+Políticas activas en `terraform/policy/`:
+
+| Archivo | Qué valida |
+|---|---|
+| `tags.rego` | Tags obligatorios: `App`, `Owner`, `Environment`, `Costcenter`, `Responsable` |
+| `s3_encryption.rego` | Buckets S3 con encriptación `aws:kms` (CMK) |
+| `s3_public_access.rego` | Buckets S3 con todas las opciones de bloqueo público en `true` |
+| `exceptions.rego` | Tipos de recursos exentos de validación de tags |
+
+Ver documentación detallada en [`terraform/policy/README.md`](terraform/policy/README.md).
+
+##### Diferencia entre Checkov y Conftest
+
+| | Checkov | Conftest |
+|---|---|---|
+| Qué analiza | Código fuente `.tf` | Plan de Terraform en JSON |
+| Políticas | Built-in (CIS, NIST, etc.) | Custom en Rego (OPA) |
+| Cuándo falla | Best practices generales de AWS | Reglas específicas del equipo/proyecto |
+| Configuración | Sin archivos adicionales | Requiere carpeta `policy/*.rego` |
 
 ```yaml
 terraform-build:
@@ -146,34 +260,66 @@ terraform-build:
       working-directory: gh_action_example2/terraform
   steps:
     - uses: actions/checkout@v4
+
+    - name: Install conftest
+      run: |
+        wget -O - 'https://github.com/open-policy-agent/conftest/releases/download/v0.68.2/conftest_0.68.2_Linux_x86_64.tar.gz' | tar zxvf - -C /tmp
+        sudo mv /tmp/conftest /usr/local/bin/conftest
+
     - uses: hashicorp/setup-terraform@v3
       with:
+        terraform_wrapper: false
         terraform_version: "1.7.0"
 
-    - name: Set environment tfvars
-      id: set_env
-      run: |
-        BRANCH="${{ github.ref_name }}"
-        case "$BRANCH" in
-          dev)      TFVARS="envs/dev.tfvars" ;;
-          dev-test) TFVARS="envs/dev-test.tfvars" ;;
-          test)     TFVARS="envs/test.tfvars" ;;
-          main)     TFVARS="envs/prod.tfvars" ;;
-          *)        TFVARS="envs/dev.tfvars" ;;
-        esac
-        echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV
+    # ... init → plan → show → checkov → conftest → apply
+```
 
-    - name: Terraform Init
-      id: tf_init
-      run: terraform init
-      continue-on-error: true
+##### Diagrama de flujo del Job 3
 
-    - name: Handle Init failure
-      if: steps.tf_init.outcome == 'failure'
-      run: |
-        echo "::error::❌ TERRAFORM INIT ha fallado."
-        exit 1
-    # ... (plan y apply siguen el mismo patrón)
+```
+[checkout] → [install conftest] → [setup terraform] → [set env tfvars]
+       │
+       ▼
+[tf init] ──✗──► [handle init failure] → exit 1
+       │ ✓
+       ▼  (pull_request)
+[tf plan -var-file=<env>.tfvars -out=tfplan.bin]
+       ──✗──► [handle plan failure] → exit 1
+       │ ✓
+       ▼  (pull_request)
+[tf show → tfplan.txt]  +  [tf show -json → tfplan.json]
+       │
+       ▼  (pull_request)
+┌─────────────────────────────────────────────────┐
+│  CHECKOV  — análisis estático sobre archivos .tf │
+│  CKV_AWS_19  encriptación habilitada             │
+│  CKV_AWS_145 encriptación con KMS                │
+│  CKV_AWS_18  access logging habilitado           │
+│  CKV2_AWS_6  public access block configurado     │
+│  CKV_AWS_7   rotación de clave KMS               │
+└──────────────┬──────────────────────────────────┘
+       ──✗──► [handle checkov failure] → exit 1
+       │ ✓
+       ▼  (pull_request + checkov ✓)
+┌─────────────────────────────────────────────────┐
+│  CONFTEST  — políticas Rego sobre tfplan.json    │
+│  tags.rego          → App, Owner, Environment,  │
+│                        Costcenter, Responsable   │
+│  s3_encryption.rego → aws:kms con CMK           │
+│  s3_public_access.rego → bloqueo público total  │
+└──────────────┬──────────────────────────────────┘
+       ──✗──► [handle conftest failure] → exit 1
+       │ ✓
+       ▼
+[Post PR comment con tfplan.txt]
+[Upload artifacts: tfplan.bin + tfplan.json + checkov-report.xml]
+       │
+       ▼  (push a main + conftest ✓)
+[tf apply -auto-approve tfplan.bin]
+       ──✗──► [handle apply failure] → exit 1
+       │ ✓
+       ▼
+[✅ apply success]
 ```
 
 ---
@@ -203,26 +349,37 @@ terraform-build:
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │              Job 3: terraform-build                          │  │
 │  │                                                              │  │
-│  │  rama → tfvars:                                              │  │
-│  │  dev → dev.tfvars │ dev-test → dev-test.tfvars              │  │
-│  │  test → test.tfvars │ main → prod.tfvars                    │  │
-│  │                                                              │  │
-│  │  [checkout] → [setup terraform] → [set env tfvars]          │  │
+│  │  [checkout] → [install conftest] → [setup terraform]        │  │
+│  │       → [set env tfvars]                                     │  │
 │  │       │                                                      │  │
 │  │       ▼                                                      │  │
 │  │  [tf init] ──✗──► [handle init failure] → exit 1            │  │
 │  │       │ ✓                                                    │  │
-│  │       ▼                                                      │  │
+│  │       ▼  (pull_request)                                      │  │
 │  │  [tf plan] ──✗──► [handle plan failure] → exit 1            │  │
 │  │       │ ✓                                                    │  │
-│  │       ▼  (solo en push)                                      │  │
+│  │       ▼  (pull_request)                                      │  │
+│  │  [tf show → tfplan.txt + tfplan.json]                        │  │
+│  │       │                                                      │  │
+│  │       ▼  (pull_request)                                      │  │
+│  │  [Checkov] ──✗──► [handle checkov failure] → exit 1         │  │
+│  │   best practices AWS/CIS sobre archivos .tf                  │  │
+│  │       │ ✓                                                    │  │
+│  │       ▼  (pull_request + checkov ✓)                          │  │
+│  │  [Conftest] ──✗──► [handle conftest failure] → exit 1       │  │
+│  │   políticas Rego: tags, s3_encryption, s3_public_access      │  │
+│  │       │ ✓                                                    │  │
+│  │       ▼                                                      │  │
+│  │  [Post PR comment] + [Upload artifacts]                      │  │
+│  │       │                                                      │  │
+│  │       ▼  (push a main + conftest ✓)                          │  │
 │  │  [tf apply] ──✗──► [handle apply failure] → exit 1          │  │
 │  │       │ ✓                                                    │  │
 │  │       ▼                                                      │  │
 │  │  [✅ apply success]                                          │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ terraform apply (solo push)
+                           │ terraform apply (solo push a main)
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          AWS (por entorno)                           │
@@ -232,7 +389,7 @@ terraform-build:
 │   │S3 Bucket│  │S3 Bucket│    │S3 Bucket│    │S3 Bucket│          │
 │   │  -dev   │  │-dev-test│    │  -test  │    │  -prod  │          │
 │   └─────────┘  └─────────┘    └─────────┘    └─────────┘          │
-│   (módulo terraform/modules/s3 — acceso público bloqueado)          │
+│   KMS CMK + access logging + public access block                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -329,5 +486,10 @@ También podés dispararlo manualmente desde Actions → CI → Run workflow.
 - Manejo de errores por step con `continue-on-error` + `if: steps.<id>.outcome`
 - Mensajes de error en GitHub CI con `echo "::error::mensaje"`
 - Deshabilitar jobs con `if: false` sin eliminarlos
-- Módulo Terraform reutilizable para AWS S3
-- Terraform apply solo en `push`, no en `pull_request`
+- Módulo Terraform reutilizable para AWS S3 con KMS, logging y bloqueo público
+- Terraform apply solo en `push` a `main`, no en `pull_request`
+- Análisis estático de infraestructura con **Checkov** (CIS Benchmark / best practices AWS)
+- Validación de políticas custom con **Conftest/OPA** (tags, encriptación, acceso público)
+- Pipeline de validación en cadena: Checkov debe pasar antes de ejecutar Conftest
+- Publicación del plan de Terraform como comentario en el Pull Request
+- Subida de artefactos (plan binario, JSON, reporte Checkov) con retención configurable
