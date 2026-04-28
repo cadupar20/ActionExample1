@@ -6,24 +6,24 @@
 # =============================================================
 package main
 
-import future.keywords.in
+import rego.v1
 
 # Obtiene todos los recursos S3 que van a ser creados o actualizados
-s3_buckets[resource] {
+s3_buckets contains resource if {
   resource := input.resource_changes[_]
   resource.type == "aws_s3_bucket"
   resource.change.actions[_] in ["create", "update"]
 }
 
 # Obtiene todos los recursos de bloqueo de acceso público
-s3_public_access_blocks[resource] {
+s3_public_access_blocks contains resource if {
   resource := input.resource_changes[_]
   resource.type == "aws_s3_bucket_public_access_block"
   resource.change.actions[_] in ["create", "update"]
 }
 
 # Extrae los bucket IDs que tienen TODAS las opciones de bloqueo en true
-fully_blocked_bucket_ids[bucket_id] {
+fully_blocked_bucket_ids contains bucket_id if {
   block := s3_public_access_blocks[_]
   block.change.after.block_public_acls       == true
   block.change.after.block_public_policy     == true
@@ -33,7 +33,7 @@ fully_blocked_bucket_ids[bucket_id] {
 }
 
 # Deniega buckets que no tienen el recurso aws_s3_bucket_public_access_block asociado
-deny[msg] {
+deny contains msg if {
   bucket := s3_buckets[_]
   bucket_name := bucket.change.after.bucket
   not fully_blocked_bucket_ids[bucket_name]
@@ -45,7 +45,7 @@ deny[msg] {
 }
 
 # Deniega si alguna opción de bloqueo está en false
-deny[msg] {
+deny contains msg if {
   block := s3_public_access_blocks[_]
   block.change.after.block_public_acls == false
 
@@ -55,7 +55,7 @@ deny[msg] {
   )
 }
 
-deny[msg] {
+deny contains msg if {
   block := s3_public_access_blocks[_]
   block.change.after.block_public_policy == false
 
@@ -65,7 +65,7 @@ deny[msg] {
   )
 }
 
-deny[msg] {
+deny contains msg if {
   block := s3_public_access_blocks[_]
   block.change.after.ignore_public_acls == false
 
@@ -75,7 +75,7 @@ deny[msg] {
   )
 }
 
-deny[msg] {
+deny contains msg if {
   block := s3_public_access_blocks[_]
   block.change.after.restrict_public_buckets == false
 
