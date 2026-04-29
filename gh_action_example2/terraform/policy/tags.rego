@@ -1,14 +1,17 @@
-# =============================================================
+# =====================================================================================
 # Policy: tags.rego
 # Valida que todos los recursos del plan tengan los tags
-# obligatorios: App, Owner, Environment, Costcenter, Responsable
-# =============================================================
+# obligatorios: app, owner, environment, costcenter, responsable, referente, backup
+# =====================================================================================
 package main
 
 import rego.v1
 
 # Tags obligatorios para todos los recursos
-required_tags := {"App", "Owner", "Environment", "Costcenter", "Responsable"}
+required_tags := {"app", "owner", "environment", "costcenter", "responsable", "referente", "backup"}
+
+# Valores permitidos para el tag backup
+allowed_backup_values := {"backup", "no-backup"}
 
 # Obtiene todos los recursos del plan que van a ser creados o actualizados
 # excluyendo tipos que no soportan tags
@@ -55,5 +58,36 @@ deny contains msg if {
   msg := sprintf(
     "❌ [TAGS] El recurso '%s' (tipo: %s) no tiene ningún tag definido.",
     [resource.address, resource.type]
+  )
+}
+
+# =============================================================
+# Validaciones especificas para nuevos tags
+# =============================================================
+
+# ✅ Validacion: tag 'referente' no puede estar vacio
+deny contains msg if {
+  resource := resource_changes[_]
+  tags := resource.change.after.tags
+
+  # Verifica que exista el tag y que no sea string vacio
+  trim(tags["referente"]) == ""
+
+  msg := sprintf(
+    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene el tag 'referente' vacio o con solo espacios.",
+    [resource.address, resource.type]
+  )
+}
+
+# ✅ Validacion: tag 'backup' solo admite valores permitidos
+deny contains msg if {
+  resource := resource_changes[_]
+  tags := resource.change.after.tags
+
+  not tags["backup"] in allowed_backup_values
+
+  msg := sprintf(
+    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene valor invalido para tag 'backup'. Valores admitidos: 'backup', 'no-backup'. Valor actual: '%s'",
+    [resource.address, resource.type, tags["backup"]]
   )
 }

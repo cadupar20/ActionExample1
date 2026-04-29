@@ -236,7 +236,7 @@ Políticas activas en `terraform/policy/`:
 
 | Archivo | Qué valida |
 |---|---|
-| `tags.rego` | Tags obligatorios: `App`, `Owner`, `Environment`, `Costcenter`, `Responsable` |
+| `tags.rego` | Tags obligatorios: `App`, `Owner`, `Environment`, `Costcenter`, `Responsable`, `referente`, `backup` |
 | `s3_encryption.rego` | Buckets S3 con encriptación `aws:kms` (CMK) |
 | `s3_public_access.rego` | Buckets S3 con todas las opciones de bloqueo público en `true` |
 | `exceptions.rego` | Tipos de recursos exentos de validación de tags |
@@ -304,7 +304,8 @@ terraform-build:
 ┌─────────────────────────────────────────────────┐
 │  CONFTEST  — políticas Rego sobre tfplan.json    │
 │  tags.rego          → App, Owner, Environment,  │
-│                        Costcenter, Responsable   │
+│                        Costcenter, Responsable,  │
+│                        referente, backup         │
 │  s3_encryption.rego → aws:kms con CMK           │
 │  s3_public_access.rego → bloqueo público total  │
 └──────────────┬──────────────────────────────────┘
