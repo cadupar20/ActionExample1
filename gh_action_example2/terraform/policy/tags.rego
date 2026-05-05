@@ -26,10 +26,8 @@ resource_changes contains resource if {
 deny contains msg if {
   resource := resource_changes[_]
   tags := resource.change.after.tags
-
   required_tag := required_tags[_]
   not tags[required_tag]
-
   msg := sprintf(
     "❌ [TAGS] El recurso '%s' (tipo: %s) no tiene el tag obligatorio '%s'.",
     [resource.address, resource.type, required_tag]
@@ -40,10 +38,8 @@ deny contains msg if {
 deny contains msg if {
   resource := resource_changes[_]
   tags := resource.change.after.tags
-
   required_tag := required_tags[_]
   tags[required_tag] == ""
-
   msg := sprintf(
     "❌ [TAGS] El recurso '%s' (tipo: %s) tiene el tag '%s' con valor vacío.",
     [resource.address, resource.type, required_tag]
@@ -54,7 +50,6 @@ deny contains msg if {
 deny contains msg if {
   resource := resource_changes[_]
   not resource.change.after.tags
-
   msg := sprintf(
     "❌ [TAGS] El recurso '%s' (tipo: %s) no tiene ningún tag definido.",
     [resource.address, resource.type]
@@ -65,29 +60,36 @@ deny contains msg if {
 # Validaciones especificas para nuevos tags
 # =============================================================
 
-# ✅ Validacion: tag 'referente' no puede estar vacio
+# Validacion: tag 'referente' no puede ser string vacío
+# En Rego v1 no existe || — se usan reglas separadas para cada condición
 deny contains msg if {
   resource := resource_changes[_]
   tags := resource.change.after.tags
-
-  # Verifica que exista el tag y que no sea string vacio
-  trim(tags["referente"]) == ""
-
+  tags["referente"] == ""
   msg := sprintf(
-    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene el tag 'referente' vacio o con solo espacios.",
+    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene el tag 'referente' con valor vacío.",
     [resource.address, resource.type]
   )
 }
 
-# ✅ Validacion: tag 'backup' solo admite valores permitidos
+# Validacion: tag 'referente' no puede ser solo espacios en blanco
 deny contains msg if {
   resource := resource_changes[_]
   tags := resource.change.after.tags
-
-  not tags["backup"] in allowed_backup_values
-
+  regex.match(`^\s+$`, tags["referente"])
   msg := sprintf(
-    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene valor invalido para tag 'backup'. Valores admitidos: 'backup', 'no-backup'. Valor actual: '%s'",
+    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene el tag 'referente' con solo espacios en blanco.",
+    [resource.address, resource.type]
+  )
+}
+
+# Validacion: tag 'backup' solo admite "backup" o "no-backup"
+deny contains msg if {
+  resource := resource_changes[_]
+  tags := resource.change.after.tags
+  not tags["backup"] in allowed_backup_values
+  msg := sprintf(
+    "❌ [TAGS] El recurso '%s' (tipo: %s) tiene valor inválido para tag 'backup': '%s'. Valores admitidos: 'backup', 'no-backup'.",
     [resource.address, resource.type, tags["backup"]]
   )
 }
