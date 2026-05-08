@@ -115,6 +115,21 @@ git clone <repo-url>
 
 Las contribuciones son bienvenidas. Abre un *issue* para discutir cambios o envía un *pull request* con mejoras.
 
+## Referencias sobre Conftest
+
+Recursos en línea para aprender más sobre Conftest, OPA/Rego y validación de políticas como código:
+
+| Recurso | Descripción |
+|---|---|
+| [Conftest — appsecsanta.com](https://appsecsanta.com/conftest) | Guía introductoria y ejemplos prácticos de Conftest |
+| [Introducing Conftest — Garethr.dev](https://garethr.dev/2019/06/introducing-conftest/) | Artículo original de presentación de Conftest por su creador |
+| [Conftest + GitHub Actions para Terraform — dev.to](https://dev.to/fukubaka0825/introducing-conftest-and-setting-up-ci-with-github-actions-to-automate-reviewing-of-terraform-code-4dfn) | Integración de Conftest en CI con GitHub Actions para revisión automática de código Terraform |
+| [Policy as Code con Conftest para Terraform — Medium](https://azizzoaib.medium.com/policy-as-code-using-conftest-for-terraform-9b24921b2ad2) | Tutorial detallado sobre políticas como código usando Conftest |
+| [Terraform Testing with OPA and Conftest — dev.to](https://dev.to/florianlenz/terraform-testing-with-open-policy-agent-and-conftest-secure-infrastructure-through-terraform-3fk4) | Testing de infraestructura Terraform con OPA y Conftest |
+| [How to Use Conftest with Terraform — OneUptime](https://oneuptime.com/blog/post/2026-02-23-how-to-use-conftest-with-terraform-for-policy-testing/view) | Guía práctica de Conftest aplicado a Terraform para policy testing |
+| [Validating Terraform Plans — blokje5.dev](https://www.blokje5.dev/posts/validating-terraform-plans/) | Validación de planes de Terraform con políticas personalizadas |
+| [OPA Conftest Policy Testing — OneUptime](https://oneuptime.com/blog/post/2026-01-28-opa-conftest-policy-testing/view) | Testing de políticas con Open Policy Agent y Conftest |
+
 ## Licencia
 
 Indica la licencia del proyecto aquí (por ejemplo, MIT).
