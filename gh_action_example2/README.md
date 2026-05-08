@@ -12,23 +12,35 @@ Este directorio es un ejemplo completo de CI con GitHub Actions que incluye:
 ## Estructura del proyecto
 
 ```
-gh_action_example2/
-├── Dockerfile                        # Imagen Docker de demo
-├── README.md                         # Este archivo
-└── terraform/
-    ├── main.tf                       # Raíz: invoca el módulo S3
-    ├── variables.tf                  # Variables de entrada
-    ├── outputs.tf                    # Outputs del módulo raíz
-    ├── envs/
-    │   ├── dev.tfvars                # Variables para entorno dev
-    │   ├── dev-test.tfvars           # Variables para entorno dev-test
-    │   ├── test.tfvars               # Variables para entorno test
-    │   └── prod.tfvars               # Variables para entorno prod (main)
-    └── modules/
-        └── s3/
-            ├── main.tf               # Recurso aws_s3_bucket + bloqueo público
-            ├── variables.tf
-            └── outputs.tf
+.
+├── .github/
+│   └── workflows/
+│       ├── gh_action1.yml              # Workflow CI básico (Terraform init → plan → apply)
+│       └── conftest-ci-sample.yml      # Workflow CI completo con Checkov + Conftest/OPA
+├── gh_action_example2/
+│   ├── Dockerfile                      # Imagen Docker de demo (Node.js Alpine)
+│   ├── README.md                       # Documentación detallada del ejemplo
+│   └── terraform/
+│       ├── main.tf                     # Módulo raíz que invoca el módulo S3
+│       ├── variables.tf                # Variables de entrada del módulo raíz
+│       ├── outputs.tf                  # Outputs del módulo raíz
+│       ├── envs/
+│       │   ├── dev.tfvars              # Variables para entorno dev
+│       │   ├── dev-test.tfvars         # Variables para entorno dev-test
+│       │   ├── test.tfvars             # Variables para entorno test
+│       │   └── prod.tfvars             # Variables para entorno prod (main)
+│       ├── modules/
+│       │   └── s3/
+│       │       ├── main.tf             # Recurso aws_s3_bucket + bloqueo público + KMS
+│       │       ├── variables.tf
+│       │       └── outputs.tf
+│       └── policy/
+│           ├── README.md               # Documentación de políticas Rego
+│           ├── tags.rego               # Política: tags obligatorios
+│           ├── s3_encryption.rego      # Política: encriptación aws:kms
+│           ├── s3_public_access.rego   # Política: bloqueo público total
+│           └── exceptions.rego         # Política: tipos exentos de validación de tags
+└── README.md                           # Este archivo
 ```
 
 ---
