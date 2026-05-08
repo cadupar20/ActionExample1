@@ -4,43 +4,44 @@ name: CI
 
 # Controla cuándo se ejecutará el flujo de trabajo.
 on:
-  # Triggers the workflow on "push" / "pull request" events but only for the "main" branch
+  # Dispara el workflow en push / pull_request sobre las ramas listadas
   push:
-    # branches: [ "main" ]
-    branches: [ "dev" ]
+    branches: [ "dev", "dev-test", "test", "main" ]
     paths: ["gh_action_example2/**"]
   pull_request:
-    # branches: [ "main" ]
-    branches: [ "dev" ]
+    branches: [ "dev", "dev-test", "test", "main" ]
     paths: ["gh_action_example2/**"]
 
-  # Allows you to run this workflow manually from the Actions tab
+  # Permite ejecutar el workflow manualmente desde la pestaña Actions
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+# Un workflow run se compone de uno o más jobs que pueden correr en paralelo o secuencia
 jobs:
-  # This workflow contains a single job called "ECHOS"
+
+  # ─────────────────────────────────────────────
+  # JOB 1 — Comandos echo básicos de demostración
+  # ─────────────────────────────────────────────
   echos:
-    # The type of runner that the job will run on
     runs-on: ubuntu-latest
     name: 1st job
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      # Checkout del repositorio (descomenta si el job necesita acceder al código)
       #- uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
+      # Ejecuta un comando de una sola línea
       - name: Run a one-line script
         run: echo Hello, world!
 
-      # Runs a set of commands using the runners shell
+      # Ejecuta un bloque de comandos multilínea
       - name: Run a multi-line script
         run: |
           echo Add other actions to build,
           echo test, and deploy your project.
 
-  # This workflow contains a 2nd step with environment variables example
+  # ─────────────────────────────────────────────
+  # JOB 2 — Demostración de variables de entorno
+  # ─────────────────────────────────────────────
   variables_entorno:
     name: 2nd job
     runs-on: ubuntu-latest
@@ -54,5 +55,108 @@ jobs:
           VAR5: by Ariel
         run: |
           echo $VAR1 $VAR2 $VAR3 $VAR4 $VAR5.
-    
-    
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Terraform: init → plan → apply
+  # Selecciona el .tfvars según la rama que dispara el workflow:
+  #   dev      → envs/dev.tfvars
+  #   dev-test → envs/dev-test.tfvars
+  #   test     → envs/test.tfvars
+  #   main     → envs/prod.tfvars
+  # ─────────────────────────────────────────────
+  terraform-build:
+    name: 3rd job - Terraform Build # Nombre del Job, visible en UI Github Actions
+    if: false # ← deshabilitado temporalmente, GitHub lo saltea sin ejecutarlo
+    runs-on: ubuntu-latest #Runner donde se ejecuta
+
+    # Directorio raíz de Terraform (donde vive main.tf)
+    defaults:
+      run:
+        working-directory: gh_action_example2/terraform
+
+    steps:
+      # 1. Checkout del repositorio (necesario para acceder a los archivos .tf y .tfvars)
+      # Clona el código del repo en el runner. Es obligatorio porque los archivos `.tf`, `.tfvars` y los módulos locales viven en el repo.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Instala la CLI de Terraform en el runner
+      # Instala la versión exacta `1.7.0` de Terraform en el runner. Esto garantiza reproducibilidad (mismo comportamiento en local y en CI).
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      # 3. Determina el archivo .tfvars según la rama activa y lo expone como variable de entorno
+      # Esto crea una __variable de entorno persistente__ (`TFVARS_FILE`) que puede usarse en steps posteriores vía `${{ env.TFVARS_FILE }}`.
+      #  __Mecanismo clave:__ `echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV`
+      - name: Set environment tfvars
+        id: set_env
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          case "$BRANCH" in
+            dev)      TFVARS="envs/dev.tfvars" ;;
+            dev-test) TFVARS="envs/dev-test.tfvars" ;;
+            test)     TFVARS="envs/test.tfvars" ;;
+            main)     TFVARS="envs/prod.tfvars" ;;
+            *)        TFVARS="envs/dev.tfvars" ;;  # fallback a dev para ramas de feature
+          esac
+          echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV
+          echo "Usando archivo de variables: $TFVARS"
+
+      # 4. Terraform Init — inicializa el backend y descarga los providers
+      - name: Terraform Init
+        id: tf_init
+        run: terraform init
+        # Continúa aunque falle para poder capturar el error en el paso siguiente
+        continue-on-error: true
+
+      # 4b. Manejo de error en Init — imprime mensaje descriptivo y detiene el job
+      - name: Handle Init failure
+        if: steps.tf_init.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM INIT ha fallado. Revisá la configuración del backend o los providers."
+          exit 1
+
+      # 5. Terraform Plan — genera el plan de ejecución usando el .tfvars del entorno
+      #- Lee las variables del archivo `.tfvars` correspondiente al entorno
+      #- Compara el estado actual (remoto o local) con la configuración deseada
+      #- Genera un __plan de ejecución__ y lo guarda en el archivo binario `tfplan`
+      #- Muestra en consola qué recursos se crearán, modificarán o destruirán
+      #
+      #__`-var-file=" env.TFVARS_FILE "`__ → Inyecta las variables del entorno correcto.\
+      #__`-out=tfplan`__ → Guarda el plan en un archivo para que `apply` lo consuma exactamente (evita recalcular).
+      - name: Terraform Plan
+        id: tf_plan
+        run: terraform plan -var-file="${{ env.TFVARS_FILE }}" -out=tfplan
+        continue-on-error: true
+
+      # 5b. Manejo de error en Plan — imprime mensaje descriptivo y detiene el job
+      # Mismo patrón que el manejo de Init: detecta fallo, imprime mensaje descriptivo con el archivo de variables usado, y detiene el job.
+      - name: Handle Plan failure
+        if: steps.tf_plan.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM PLAN ha fallado con el archivo ${{ env.TFVARS_FILE }}. Revisá las variables o los recursos definidos."
+          exit 1
+
+      # 6. Terraform Apply — aplica el plan generado (solo en push, no en pull_request)
+      # Esto es una __buena práctica de seguridad__: los PRs solo hacen `plan` (preview), nunca `apply`.
+      - name: Terraform Apply
+        id: tf_apply
+        if: github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
+        continue-on-error: true
+
+      # 6b. Manejo de error en Apply — imprime mensaje descriptivo y detiene el job
+      # Captura fallos en la aplicación real (permisos AWS, conflictos de estado, límites de servicio, etc.).
+      - name: Handle Apply failure
+        if: steps.tf_apply.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM APPLY ha fallado. Revisá los permisos del provider o el estado del plan."
+          exit 1
+
+      # 7. Confirmación de éxito
+      # Mensaje de éxito visible en los logs, solo cuando el evento fue `push` y todo salió bien.
+      - name: Terraform apply success
+        if: github.event_name == 'push'
+        run: echo "✅ Terraform Apply completado exitosamente para el entorno ${{ env.TFVARS_FILE }}."

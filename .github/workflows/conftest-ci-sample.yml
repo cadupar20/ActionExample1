@@ -1,0 +1,262 @@
+# This is a workflow to run Terraform and ConfTest/OPA tool
+name: CI-tf-plan-conftest
+
+
+on:
+  pull_request: 
+    branches: [ "dev", "dev-test", "test", "main" ]
+    paths: ["gh_action_example2/**"]
+
+  push:
+    branches: [ "dev", "dev-test", "test", "main" ]
+    paths: ["gh_action_example2/**"]
+
+env:
+  TF_VERSION:  1.7.0
+  CONFTEST_VERSION: 0.68.2
+  WORKING_DIR: gh_action_example2/terraform
+
+jobs:
+  terraform:
+    name: terraform-build-with-conftest
+    if: false # ← deshabilitado temporalmente, GitHub lo saltea sin ejecutarlo (cambiar a true para activar)
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout del repositorio (necesario para acceder a los archivos .tf y .tfvars)
+      # Clona el código del repo en el runner. Es obligatorio porque los archivos `.tf`, `.tfvars` y los módulos locales viven en el repo.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Instala conftest en el runner.
+      # Conftest (basado en Open Policy Agent - OPA) valida configuraciones (YAML, JSON, Terraform plan, etc.)
+      # contra políticas escritas en Rego. Se instala manualmente porque la action oficial está en desuso.
+      - name: Install conftest
+        run: |
+          wget -O - 'https://github.com/open-policy-agent/conftest/releases/download/v${{ env.CONFTEST_VERSION }}/conftest_${{ env.CONFTEST_VERSION }}_Linux_x86_64.tar.gz' | tar zxvf - -C /tmp
+          sudo mv /tmp/conftest /usr/local/bin/conftest
+          conftest --version
+      
+      # Instala la CLI de Terraform en el runner.
+      # Instala la versión exacta `1.7.0` de Terraform en el runner. Esto garantiza reproducibilidad (mismo comportamiento en local y en CI).
+      # `terraform_wrapper: false` → evita que el wrapper de la action capture stdout/stderr, evitando problemas con `terraform show -json`
+      # y permitiendo que los pasos posteriores lean directamente la salida de los comandos.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.YOUR_CRED_NAME}}
+
+      # Determina el archivo .tfvars según la rama activa y lo expone como variable de entorno.
+      # Esto crea una variable de entorno persistente (`TFVARS_FILE`) que puede usarse en steps posteriores vía `${{ env.TFVARS_FILE }}`.
+      # Mecanismo clave: `echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV`
+      - name: Set environment tfvars
+        id: set_env
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          case "$BRANCH" in
+            dev)      TFVARS="envs/dev.tfvars" ;;
+            dev-test) TFVARS="envs/dev-test.tfvars" ;;
+            test)     TFVARS="envs/test.tfvars" ;;
+            main)     TFVARS="envs/prod.tfvars" ;;
+            *)        TFVARS="envs/dev.tfvars" ;;  # fallback a dev para ramas de feature
+          esac
+          echo "TFVARS_FILE=$TFVARS" >> $GITHUB_ENV
+          echo "Usando archivo de variables: $TFVARS"
+
+      # Terraform Init — inicializa el backend y descarga los providers.
+      # Lee la configuración del backend remoto definida en los archivos .tf (ej. S3 + DynamoDB para bloqueo de estado)
+      # y descarga los providers/plugins necesarios en el directorio .terraform/.
+      - name: Terraform Init ${{ env.WORKING_DIR }}
+        id: tf_init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+        continue-on-error: true
+
+      # Manejo de error en Init — imprime mensaje descriptivo y detiene el job
+      - name: Handle Init failure
+        if: steps.tf_init.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM INIT ha fallado. Revisá la configuración del backend o los providers."
+          exit 1
+
+      # Terraform Plan — genera el plan de ejecución usando el .tfvars del entorno.
+      # - Lee las variables del archivo `.tfvars` correspondiente al entorno.
+      # - Compara el estado actual (remoto o local) con la configuración deseada.
+      # - Genera un plan de ejecución y lo guarda en el archivo binario `tfplan.bin`.
+      # - Muestra en consola qué recursos se crearán, modificarán o destruirán.
+      #
+      # `-var-file=" env.TFVARS_FILE "` → Inyecta las variables del entorno correcto.
+      # `-out=tfplan` → Guarda el plan en un archivo para que `apply` lo consuma exactamente (evita recalcular).
+      # `-no-color` → Elimina códigos ANSI para una salida legible en logs de GitHub Actions.
+      # `-lock=false` → Deshabilita el bloqueo de estado (state lock). Útil en CI de solo lectura (plan),
+      #   pero riesgoso si hay aplicaciones concurrentes que modifican el estado.
+      # `-parallelism=50` → Limita las operaciones paralelas de Terraform contra la API de AWS,
+      #   evitando throttling (rate limiting) en cuentas con muchos recursos.
+      - name: Terraform Plan ${{ env.WORKING_DIR }}
+        id: tf_plan
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform plan -var-file="${{ env.TFVARS_FILE }}" -out=tfplan.bin -no-color -lock=false -parallelism=50
+        continue-on-error: true
+
+      # Manejo de error en Plan — imprime mensaje descriptivo y detiene el job
+      - name: Handle Plan failure
+        if: steps.tf_plan.outcome == 'failure' 
+        run: |
+          echo "::error::❌ TERRAFORM PLAN ha fallado con el archivo ${{ env.TFVARS_FILE }}. Revisá las variables o los recursos definidos."
+          exit 1
+
+      # Terraform Show (texto plano) — genera una versión legible del plan para comentarios en PR.
+      # El archivo binario `tfplan.bin` no es legible humanamente; `terraform show` lo convierte a texto.
+      # Este archivo (`tfplan.txt`) se usa para publicar el diff en comentarios del Pull Request.
+      - name: Convert terraform plan result to text
+        if: github.event_name == 'pull_request'
+        id: convert_tfplan_text
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform show -no-color tfplan.bin > tfplan.txt
+        continue-on-error: true
+
+      # Manejo de error en Show a texto — detiene el job si no se puede generar la representación legible.
+      - name: Handle Show text failure
+        if: steps.convert_tfplan_text.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM SHOW (texto) ha fallado. No se pudo generar la salida legible del plan."
+          exit 1
+
+      # Terraform Show (JSON) — genera el archivo JSON requerido por Conftest/OPA.
+      # Conftest consume JSON, no el binario `tfplan.bin`. `terraform show -json` serializa el plan completo
+      # (recursos, variables, outputs, cambios) en un formato que las políticas Rego pueden evaluar.
+      - name: Convert terraform plan result to json format
+        if: github.event_name == 'pull_request'
+        id: convert_tfplan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform show -json tfplan.bin > tfplan.json
+        continue-on-error: true
+
+      # Manejo de error en Show a JSON — detiene el job si no se puede generar el JSON para Conftest.
+      - name: Handle Show JSON failure
+        if: steps.convert_tfplan.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM SHOW (JSON) ha fallado. No se pudo generar el archivo para Conftest."
+          exit 1
+    
+      # Checkov — análisis estático de mejores prácticas sobre los archivos .tf
+      # Checkov escanea el código fuente de Terraform (no el plan) y detecta configuraciones
+      # inseguras o que no siguen best practices de AWS (CIS Benchmark, NIST, etc.).
+      # Se ejecuta antes de Conftest para detectar problemas en el código fuente tempranamente.
+      # `--directory` apunta al directorio con los archivos .tf
+      # `--framework terraform` limita el análisis solo a recursos Terraform
+      # `--output cli` muestra resultados en consola con formato legible
+      # `--soft-fail` permite que el step continúe aunque haya findings (se controla en el siguiente step)
+      - name: Install and run Checkov
+        if: github.event_name == 'pull_request'
+        id: checkov
+        run: |
+          pip install checkov --quiet
+          checkov \
+            --directory ${{ env.WORKING_DIR }} \
+            --framework terraform \
+            --output cli \
+            --output junitxml \
+            --output-file-path console,checkov-report.xml \
+            --no-guide \
+            --compact \
+            --soft-fail
+        continue-on-error: true
+
+      # Manejo de error en Checkov — detiene el job si hay findings críticos
+      - name: Handle Checkov failure
+        if: steps.checkov.outcome == 'failure'
+        run: |
+          echo "::error::❌ CHECKOV ha fallado. Se detectaron configuraciones que no cumplen con las mejores prácticas de Terraform/AWS. Revisá el reporte en los logs."
+          exit 1
+
+      # Publica el reporte de Checkov como artefacto para revisión
+      - name: Upload Checkov report
+        if: github.event_name == 'pull_request' && steps.checkov.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-report-${{ github.ref_name }}-${{ github.run_id }}
+          path: checkov-report.xml
+          retention-days: 15
+
+      # Conftest — validación de políticas contra el plan de Terraform.
+      # Conftest ejecuta políticas Rego ubicadas por defecto en la carpeta `policy/` del working dir.
+      # Evalúa que el plan cumpla con normas de seguridad, costos, tagging, etc.
+      # Si alguna política falla, el pipeline se detendrá en el siguiente paso (Handle Conftest failure).
+      - name: Conftest test
+        if: github.event_name == 'pull_request'
+        id: conftest
+        working-directory: ${{ env.WORKING_DIR }}
+        run: conftest test --no-color tfplan.json
+        continue-on-error: true
+
+      # Manejo de error en Conftest — detiene el job si el plan no cumple las políticas.
+      - name: Handle Conftest failure
+        if: steps.conftest.outcome == 'failure'
+        run: |
+          echo "::error::❌ CONFTEST ha fallado. El plan de Terraform no cumple con las políticas definidas (policy/*.rego)."
+          exit 1
+
+      # -------------------------------------------------------------------------
+      # PASOS POST-CONFTEST (ejecutan solo si Conftest fue exitoso)
+      # -------------------------------------------------------------------------
+
+      # Opción A — Publicar el plan como comentario en el Pull Request.
+      # Facilita la revisión del equipo sin necesidad de descargar logs.
+      # Usa el contenido de `tfplan.txt` generado previamente.
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request' && steps.conftest.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ env.WORKING_DIR }}/tfplan.txt', 'utf8');
+            const body = `### ✅ ConfTest pasó satisfactoriamente\n<details><summary>Ver Terraform Plan</summary>\n\n\`\`\`\n${planOutput}\n\`\`\`\n</details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      # Opción B — Guardar artefactos del plan para auditoría y posible apply posterior.
+      # El artefacto incluye tanto el plan binario (`tfplan`) como el JSON (`tfplan.json`).
+      # `retention-days: 15` limita el almacenamiento en GitHub.
+      - name: Upload Plan Artifact Gitlab
+        if: steps.conftest.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.ref_name }}-${{ github.run_id }}
+          path: |
+            ${{ env.WORKING_DIR }}/tfplan
+            ${{ env.WORKING_DIR }}/tfplan.json
+          retention-days: 15
+
+      # Opción C — Terraform Apply automático (solo en push a main tras conftest exitoso).
+      # Aplica el plan previamente validado por Conftest de forma no interactiva.
+      # NOTA DE SEGURIDAD: Considerar usar un environment protegido (required reviewers, branch protection)
+      # y/o un job separado con `needs: terraform` para evitar aplicaciones accidentales.
+      - name: Terraform Apply
+        id: tf_apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.conftest.outcome == 'success'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan
+        continue-on-error: true
+
+      # Manejo de error en Apply — imprime mensaje descriptivo y detiene el job
+      # Captura fallos en la aplicación real (permisos AWS, conflictos de estado, límites de servicio, etc.).
+      - name: Handle Apply failure
+        if: steps.tf_apply.outcome == 'failure'
+        run: |
+          echo "::error::❌ TERRAFORM APPLY ha fallado. Revisá los permisos del provider o el estado del plan."
+          exit 1
+
+      # 7. Confirmación de éxito
+      # Mensaje de éxito visible en los logs, solo cuando el evento fue `push` y todo salió bien.
+      - name: Terraform apply success
+        if: github.event_name == 'push'
+        run: echo "✅ Terraform Apply completado exitosamente para el entorno ${{ env.TFVARS_FILE }}."
